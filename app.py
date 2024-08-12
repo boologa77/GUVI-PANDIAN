@@ -6,12 +6,12 @@ import json
 client = boto3.client(
     'lambda',
     region_name='ap-southeast-2',
-    aws_access_key_id='AKIAW3MED4XMIEFPACP5',
-    aws_secret_access_key='Esm+nwGkGi7m6pj27nBXomQ8tTFVHQ7mBmg37KDr'
+    aws_access_key_id='A',
+    aws_secret_access_key=''
 )
 
 # Define the ARN of your Lambda function
-LAMBDA_ARN = 'arn:aws:lambda:ap-southeast-2:471112869336:function:SocialMediaLambda'
+LAMBDA_ARN = '"
 
 st.title("Trending Hashtags")
 
