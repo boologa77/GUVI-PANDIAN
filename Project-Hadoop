@@ -1,1 +1,82 @@
-k
+AWS ec2 instance with open internet access and size and ARM64
+Preferably t4g.xlarge
+Connect to the instance
+sudo yum update -y or sudo apt-get update -y
+sudo yum install -y docker or sudo apt-get install docker.io -y
+docker --version (check installation) or sudo apt-get install docker.io -y
+
+
+sudo service docker start (Start the Docker service)
+sudo usermod -aG docker $USER(Add the user to the docker group)
+Exit and re connect for it to take action
+sudo service docker restart
+sudo curl -L "https://github.com/docker/compose/releases/download/v2.6.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose (apply executable permissions to the binary)
+
+
+docker-compose --version
+
+
+docker pull mentornirmal/devbox-coder:latest
+docker pull mentornirmal/mysql:8.0
+
+
+Mkdir project (for folder)
+Pwd and replace the path in volume 
+ In docker-compose.yml (CMS: nano docker-compose.yml)
+version: "3.8"
+services:
+  coder:
+    image: mentornirmal/devbox-coder:latest
+    ports:
+      - "8080:8080"    # Port mapping for code-server
+      - "9870:50070"    # HDFS NameNode
+      - "9864:50010"    # HDFS DataNode
+      - "8042:8042"    # YARN NodeManager
+      - "8088:8032"    # YARN ResourceManager
+    volumes:
+      - /home/ec2-user/nirmal:/home/coder/project
+    depends_on:
+      - mysql
+
+  mysql:
+    image: mentornirmal/mysql:8.0  
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_USER: coder
+      MYSQL_PASSWORD: coderpassword
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: always
+
+volumes:
+  mysql_data:
+
+
+docker-compose up -d
+sudo chown -R coder:coder /home/coder/project (to create an play with files)
+Password ;codeserver
+
+
+mkdir -p /home/coder/project/pan
+wget https://www2.census.gov/programs-surveys/popest/datasets/2010-2020/cities/SUB-EST2020_1.csv -O /home/coder/project/pan/census_data.csv
+
+
+hdfs dfs -mkdir -p /bigboy/hadoop/pan
+hdfs dfs -put /home/coder/project/pan/census_data.csv /bigboy/hadoop/pan/census_data_hdfs.csv
+
+
+CREATE TABLE IF NOT EXISTS census_table (
+  SUMLEV INT, STATE INT, COUNTY INT, PLACE INT, COUSUB INT, CONCIT INT, PRIMGEO_FLAG INT, FUNCSTAT STRING, NAME STRING, STNAME STRING, CENSUS2010POP INT, ESTIMATESBASE2010 INT, POPESTIMATE2010 INT, POPESTIMATE2011 INT, POPESTIMATE2012 INT, POPESTIMATE2013 INT, POPESTIMATE2014 INT, POPESTIMATE2015 INT, POPESTIMATE2016 INT, POPESTIMATE2017 INT, POPESTIMATE2018 INT, POPESTIMATE2019 INT, POPESTIMATE042020 INT, POPESTIMATE2020 INT
+) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE;
+
+
+LOAD DATA INPATH '/bigboy/hadoop/pan/census_data_hdfs.csv' INTO TABLE census_table;
+
+SELECT * FROM census_table LIMIT 10;
+
+
+
+
