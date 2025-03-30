@@ -1,0 +1,329 @@
+import streamlit as st
+import boto3
+import json
+import time
+from botocore.exceptions import NoCredentialsError
+
+# AWS credentials (replace with a more secure method)
+aws_access_key = ''
+aws_secret_key = 
+region = 'us-east-1'
+
+# Initialize boto3 clients
+s3 = boto3.client('s3', 
+                  aws_access_key_id=aws_access_key, 
+                  aws_secret_access_key=aws_secret_key,
+                  region_name=region)
+
+step_functions = boto3.client('stepfunctions', 
+                              aws_access_key_id=aws_access_key, 
+                              aws_secret_access_key=aws_secret_key,
+                              region_name=region)
+
+# S3 Bucket and file details
+ORDERS_BUCKET = 'ecommerce-orders-bucket'
+RETURNS_BUCKET = 'ecommerce-returns-bucket'
+S3_BUCKET_NAME = 'ecommerce-arn-bucket'  # Bucket to store execution ARN
+S3_FILE_KEY = 'execution-arn.json'  # File to store the execution ARN
+
+# Streamlit app title
+st.title("Orders and Returns Upload with Step Function Status")
+
+# Upload Orders file
+order_file = st.file_uploader("Upload Orders File", type=['csv', 'xlsx'], key='orders')
+if order_file:
+    if st.button("Upload Orders File"):
+        try:
+            # Upload Orders file to S3
+            s3.upload_fileobj(order_file, ORDERS_BUCKET, order_file.name)
+            st.success(f"Orders file uploaded successfully: {order_file.name}")
+        except NoCredentialsError:
+            st.error("Error: AWS credentials are missing or incorrect.")
+        except Exception as e:
+            st.error(f"Error uploading Orders file: {e}")
+
+# Upload Returns file
+returns_file = st.file_uploader("Upload Returns File", type=['csv', 'xlsx'], key='returns')
+if returns_file:
+    if st.button("Upload Returns File"):
+        try:
+            # Upload Returns file to S3
+            s3.upload_fileobj(returns_file, RETURNS_BUCKET, returns_file.name)
+            st.success(f"Returns file uploaded successfully: {returns_file.name}")
+        except NoCredentialsError:
+            st.error("Error: AWS credentials are missing or incorrect.")
+        except Exception as e:
+            st.error(f"Error uploading Returns file: {e}")
+
+
+# Function to get the execution ARN from S3
+def get_execution_arn_from_s3():
+    try:
+        # Fetch the JSON file containing the execution ARN from S3
+        response = s3.get_object(Bucket=S3_BUCKET_NAME, Key=S3_FILE_KEY)
+        arn_data = json.loads(response['Body'].read().decode('utf-8'))
+        return arn_data.get('execution_arn', None)
+    except Exception as e:
+        st.error(f"Error fetching execution ARN from S3: {e}")
+        return None
+
+# Function to check Step Function execution status
+def check_step_function_status(execution_arn):
+    try:
+        # Describe the Step Function execution
+        response = step_functions.describe_execution(
+            executionArn=execution_arn
+        )
+        return response['status']
+    except Exception as e:
+        st.error(f"Error checking Step Function status: {e}")
+        return None
+
+# Polling for the Step Function status
+def poll_step_function_status(execution_arn, max_retries=10, delay=5):
+    retries = 0
+    status = check_step_function_status(execution_arn)
+    
+    # Keep polling until it reaches a terminal state or retries exceed max_retries
+    while status not in ["SUCCEEDED", "FAILED", "TIMED_OUT"] and retries < max_retries:
+        time.sleep(delay)
+        status = check_step_function_status(execution_arn)
+        retries += 1
+    
+    return status
+
+# Fetch execution ARN from S3 and monitor the status
+if st.button("Check Step Function Status"):
+    execution_arn = get_execution_arn_from_s3()
+    if execution_arn:
+        st.write(f"Execution ARN: {execution_arn}")
+        status = poll_step_function_status(execution_arn)
+        
+        if status:
+            st.write(f"Step Function Status: {status}")
+            if status == "SUCCEEDED":
+                st.success("Step Function executed successfully.")
+            elif status == "FAILED":
+                st.error("Step Function execution failed.")
+            elif status == "TIMED_OUT":
+                st.warning("Step Function timed out.")
+            else:
+                st.info(f"Step Function is still {status}.")
+        else:
+            st.error("Failed to retrieve Step Function status.")
+    else:
+        st.warning("No execution ARN found.")
+
+
+
+////////////////////////////////////////////////////////////////////////////
+
+
+import sys
+from pyspark.sql import DataFrame
+from awsglue.context import GlueContext
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from pyspark.sql.functions import col
+import boto3
+
+# Initialize GlueContext
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+
+# Initialize S3 client
+s3 = boto3.client('s3')
+
+# S3 Buckets for Orders and Returns
+orders_bucket = 'ecommerce-orders-bucket'
+returns_bucket = 'ecommerce-returns-bucket'
+
+# Function to get the latest file from an S3 bucket
+def get_latest_s3_file(bucket_name):
+    objects = s3.list_objects_v2(Bucket=bucket_name)
+    if 'Contents' in objects:
+        latest_file = max(objects['Contents'], key=lambda x: x['LastModified'])
+        return latest_file['Key']  # Returns the file name (key)
+    else:
+        raise Exception(f"No files found in bucket {bucket_name}")
+
+# Get the latest file uploaded in Orders and Returns buckets
+orders_file_key = get_latest_s3_file(orders_bucket)
+returns_file_key = get_latest_s3_file(returns_bucket)
+
+# S3 paths for Orders and Returns (with the dynamically captured file names)
+orders_s3_path = f"s3://{orders_bucket}/{orders_file_key}"
+returns_s3_path = f"s3://{returns_bucket}/{returns_file_key}"
+
+# Read Orders and Returns data into separate dataframes
+orders_df = spark.read.format("csv").option("header", "true").load(orders_s3_path)
+returns_df = spark.read.format("csv").option("header", "true").load(returns_s3_path)
+
+# Filter both dataframes where OrderID is not null
+orders_df_filtered = orders_df.filter(col("OrderID").isNotNull())
+returns_df_filtered = returns_df.filter(col("OrderID").isNotNull())
+
+# Perform a left join on OrderID, keeping all records from Orders
+joined_df = orders_df_filtered.join(returns_df_filtered, on="OrderID", how="left")
+
+# Output the resulting schema (optional)
+joined_df.printSchema()
+
+# Store the transformed data into Amazon RDS using JDBC
+jdbc_url = "jdbc:mysql://ecommerce-transformed-db.cpm08ke4ko9a.us-east-1.rds.amazonaws.com:3306/ecommerce-transformed-db"  # Your RDS endpoint
+db_properties = {
+    "user": "pandian",  # Your RDS username
+    "password": "Arctic_77",  # Your RDS password
+    "driver": "com.mysql.cj.jdbc.Driver"  # MySQL JDBC driver
+}
+
+# Write the transformed data to RDS
+joined_df.write.jdbc(url=jdbc_url, table="transformed_orders_returns", mode="overwrite", properties=db_properties)
+
+# Stop the Spark session
+spark.stop()
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+{
+  "Comment": "ETL Pipeline with Crawler and Glue Jobs",
+  "StartAt": "StartCrawler-ecommerce-orders-crawler",
+  "States": {
+    "StartCrawler-ecommerce-orders-crawler": {
+      "Type": "Task",
+      "Parameters": {
+        "Name": "ecommerce-orders-crawler"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Next": "GetCrawler-ecommerce-orders-crawler"
+    },
+    "GetCrawler-ecommerce-orders-crawler": {
+      "Type": "Task",
+      "Parameters": {
+        "Name": "ecommerce-orders-crawler"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Next": "Wait-Orders"
+    },
+    "Wait-Orders": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "Choice-Orders"
+    },
+    "Choice-Orders": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Crawler.State",
+          "StringEquals": "READY",
+          "Next": "StartCrawler-ecommerce-returns-crawler"
+        },
+        {
+          "Variable": "$.Crawler.State",
+          "StringEquals": "FAILED",
+          "Next": "SNS-Publish-Failure"
+        },
+        {
+          "Variable": "$.Crawler.State",
+          "StringEquals": "RUNNING",
+          "Next": "Wait-Orders"
+        }
+      ]
+    },
+    "StartCrawler-ecommerce-returns-crawler": {
+      "Type": "Task",
+      "Parameters": {
+        "Name": "ecommerce-returns-crawler"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Next": "GetCrawler-ecommerce-returns-crawler"
+    },
+    "GetCrawler-ecommerce-returns-crawler": {
+      "Type": "Task",
+      "Parameters": {
+        "Name": "ecommerce-returns-crawler"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Next": "Wait-Returns"
+    },
+    "Wait-Returns": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "Choice-Returns"
+    },
+    "Choice-Returns": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Crawler.State",
+          "StringEquals": "READY",
+          "Next": "Glue-StartJobRun"
+        },
+        {
+          "Variable": "$.Crawler.State",
+          "StringEquals": "FAILED",
+          "Next": "SNS-Publish-Failure"
+        },
+        {
+          "Variable": "$.Crawler.State",
+          "StringEquals": "RUNNING",
+          "Next": "Wait-Returns"
+        }
+      ]
+    },
+    "Glue-StartJobRun": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun",
+      "Parameters": {
+        "JobName": "orders-returns-etl-job"
+      },
+      "ResultPath": "$.GlueJobRun",
+      "Next": "GetJobRun"
+    },
+    "GetJobRun": {
+      "Type": "Task",
+      "Parameters": {
+        "JobName": "orders-returns-etl-job",
+        "RunId.$": "$.GlueJobRun.JobRunId"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:glue:getJobRun",
+      "Next": "Choice-GlueJob"
+    },
+    "Choice-GlueJob": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.JobRun.JobRunState",
+          "StringEquals": "SUCCEEDED",
+          "Next": "SNS-Publish-Success"
+        },
+        {
+          "Variable": "$.JobRun.JobRunState",
+          "StringEquals": "FAILED",
+          "Next": "SNS-Publish-Failure"
+        }
+      ]
+    },
+    "SNS-Publish-Success": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:867344446187:ETL-Pipeline-Notifications",
+        "Message": "Success: ETL pipeline completed successfully."
+      },
+      "End": true
+    },
+    "SNS-Publish-Failure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:867344446187:ETL-Pipeline-Notifications",
+        "Message": "Failure: ETL pipeline failed."
+      },
+      "End": true
+    }
+  }
+}
